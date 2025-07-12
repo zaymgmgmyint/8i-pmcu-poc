@@ -35,8 +35,9 @@ build/
 # Compiled class file
 *.class
 
-# Log file
+# Log files
 *.log
+logs/
 
 # BlueJ files
 *.ctxt
