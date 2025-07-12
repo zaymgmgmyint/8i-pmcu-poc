@@ -7,6 +7,7 @@ import com.eighti.pmcu.poc.response.SecondLoginResponse;
 import org.apache.activemq.ActiveMQSslConnectionFactory;
 import org.apache.activemq.command.ActiveMQTopic;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,6 +33,10 @@ public class MqSubscriberService {
 
     @Autowired
     private DssService dssService;
+
+    private Connection connection;
+    private Session session;
+    private MessageConsumer consumer;
 
     @PostConstruct
     public void subscribeToMq() {
@@ -66,7 +71,6 @@ public class MqSubscriberService {
     }
 
     private void listenToMq(String mqUrl, String userName, String password, String topicName) {
-        Connection connection = null;
         try {
             ActiveMQSslConnectionFactory factory = new ActiveMQSslConnectionFactory(mqUrl);
             // Bypass SSL certificate validation for testing only
@@ -77,9 +81,9 @@ public class MqSubscriberService {
             connection = factory.createConnection();
             connection.start();
             logger.info("MQ connection established successfully to {} as user {}", mqUrl, userName);
-            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
             Topic topic = new ActiveMQTopic(topicName);
-            MessageConsumer consumer = session.createConsumer(topic);
+            consumer = session.createConsumer(topic);
             logger.info("Start listening to topic: {}", topicName);
             consumer.setMessageListener(message -> {
                 if (message instanceof TextMessage) {
@@ -106,6 +110,25 @@ public class MqSubscriberService {
             logger.error("Unexpected error in listenToMq: {}", e.getMessage(), e);
         }
     }
+
+    @PreDestroy
+    public void cleanup() {
+        logger.info("Closing MQ connection, session, and consumer.");
+        try {
+            if (consumer != null) {
+                consumer.close();
+            }
+            if (session != null) {
+                session.close();
+            }
+            if (connection != null) {
+                connection.close();
+            }
+        } catch (JMSException e) {
+            logger.error("Error closing JMS resources: {}", e.getMessage(), e);
+        }
+    }
+
 
     /**
      * Decrypts the MQ password using AES/CBC/PKCS7Padding and BouncyCastle
