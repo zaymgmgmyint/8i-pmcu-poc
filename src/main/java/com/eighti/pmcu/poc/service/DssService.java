@@ -2,6 +2,7 @@ package com.eighti.pmcu.poc.service;
 
 import com.eighti.pmcu.poc.exception.DssServiceException;
 import com.eighti.pmcu.poc.request.FirstLoginRequest;
+import com.eighti.pmcu.poc.request.KeepAliveRequest;
 import com.eighti.pmcu.poc.request.SecondLoginRequest;
 import com.eighti.pmcu.poc.response.FirstLoginResponse;
 import com.eighti.pmcu.poc.response.GetMqConfigResponse;
@@ -10,11 +11,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * AGENT: See: docs/dss-api-spec.md
@@ -38,6 +42,12 @@ public class DssService {
 
     @Value("${client-ip}")
     private String clientIp;
+
+    // Holds the live token for the app
+    private final AtomicReference<String> currentToken = new AtomicReference<>();
+
+    @Value("${dss.keepalive-interval-ms:30000}")
+    private long keepAliveInterval;
 
     private final RestTemplate restTemplate; // Inject SSL-configured RestTemplate
 
@@ -165,6 +175,37 @@ public class DssService {
         }
     }
 
+    // Send keep alive to DSS
+    public void sendKeepAlive() {
+        String token = currentToken.get();
+        if (token == null) {
+            log.error("❌ Failed to get token from DSS");
+            throw new IllegalStateException("❌ No token available—must login first");
+        }
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-Subject-Token", token);
+
+        restTemplate.exchange(
+                baseUrl + "/brms/api/v1.0/accounts/keepAlive",
+                HttpMethod.POST,
+                new HttpEntity<>(new KeepAliveRequest(token), headers),
+                Void.class
+        );
+    }
+
+    // Schedule the keep alive task
+    @Scheduled(fixedDelayString = "#{dssService.keepAliveInterval}")
+    public void scheduleKeepAlive() {
+        try{
+            sendKeepAlive();
+            log.info("✅ Keep alive sent to DSS");
+        }catch (Exception e) {
+            log.error("❌ Keep-alive failed to DSS, will retry on next schedule: {}", e.getMessage(), e);
+        }
+    }
+
     private String md5(String input) {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
@@ -187,7 +228,7 @@ public class DssService {
             String token = secondLoginResponse.getToken();
 
             if (token == null) {
-                log.error("Failed to get token from DSS");
+                log.error("❌ Failed to get token from DSS");
                 throw new DssServiceException("Failed to get token from DSS", null);
             }
 
@@ -197,7 +238,6 @@ public class DssService {
             headers.set("X-Subject-Token", token);
 
             HttpEntity<Void> requestEntity = new HttpEntity<>(headers);
-
 
             ResponseEntity<GetMqConfigResponse> responseEntity = restTemplate.exchange(
                     url,
@@ -245,6 +285,11 @@ public class DssService {
      */
     public String getPlainSecretVector() {
         return lastPlainSecretVector;
+    }
+
+    // AGENT: Expose the current DSS session token for API calls
+    public String getCurrentToken() {
+        return currentToken.get();
     }
 
 

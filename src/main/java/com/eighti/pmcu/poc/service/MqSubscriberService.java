@@ -4,6 +4,10 @@ import com.eighti.pmcu.poc.exception.DssServiceException;
 import com.eighti.pmcu.poc.response.FirstLoginResponse;
 import com.eighti.pmcu.poc.response.GetMqConfigResponse;
 import com.eighti.pmcu.poc.response.SecondLoginResponse;
+import com.eighti.pmcu.poc.response.VmsAddVisitorMessage;
+import com.eighti.pmcu.poc.request.AddPersonRequest;
+import com.eighti.pmcu.poc.response.AddPersonResponse;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.activemq.ActiveMQSslConnectionFactory;
 import org.apache.activemq.command.ActiveMQTopic;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -11,6 +15,7 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
@@ -28,11 +33,22 @@ import java.util.Base64;
 @Service
 public class MqSubscriberService {
     private static final Logger logger = LoggerFactory.getLogger(MqSubscriberService.class);
-    private static final String TOPIC_NAME = "mq.common.msg.topic";
-    private static final String LISTEN_MESSAGE_NAME = "vms.addVisitor";
+
+    @Value("${mq.topic}")
+    private String commonTopic;
+
+    @Value("${mq.method-filter}")
+    private String methodFilter;
+
+    @Value("${mq.scheme}")
+    private String schema;
 
     @Autowired
     private DssService dssService;
+    @Autowired
+    private PersonService personService;
+    @Autowired
+    private ObjectMapper objectMapper;
 
     private Connection connection;
     private Session session;
@@ -44,7 +60,7 @@ public class MqSubscriberService {
             GetMqConfigResponse mqConfig = dssService.getMqConfig();
             GetMqConfigResponse.DataDto data = mqConfig.getData();
             if (data != null) {
-                String mqUrl = "ssl://" + data.getAddr();
+                String mqUrl = schema + "://" + data.getAddr();
                 String userName = data.getUserName();
                 String encryptedPassword = data.getPassword();
                 // Use the plain secretKey and secretVector generated during second login (not the encrypted ones from the response)
@@ -61,7 +77,7 @@ public class MqSubscriberService {
                     return;
                 }
                 logger.info("♻️ Preparing to connect to MQ at {} (port {})", mqUrl, port);
-                listenToMq(mqUrl, userName, password, TOPIC_NAME);
+                listenToMq(mqUrl, userName, password, commonTopic);
             } else {
                 logger.error("❌ MQ config data is null from DSS response");
             }
@@ -80,7 +96,7 @@ public class MqSubscriberService {
             factory.setPassword(password);
             connection = factory.createConnection();
             connection.start();
-            logger.info("MQ connection established successfully to {} as user {}", mqUrl, userName);
+            logger.info("🚀 MQ connection established successfully to {} as user {}", mqUrl, userName);
             session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
             Topic topic = new ActiveMQTopic(topicName);
             consumer = session.createConsumer(topic);
@@ -90,25 +106,69 @@ public class MqSubscriberService {
                     try {
                         String text = ((TextMessage) message).getText();
                         if (text != null) {
-                            // Only log vms.addVisitor messages as info, others as debug
-                            if (text.contains("\"method\":\"vms.addVisitor\"")) {
-                                logger.info("Received vms.addVisitor message: {}", text);
+                            if (text.contains("\"method\":\"" + methodFilter + "\"")) {
+                                logger.info("✅ Received vms.addVisitor message: {}", text);
+                                try {
+                                    VmsAddVisitorMessage visitorMsg = objectMapper.readValue(text, VmsAddVisitorMessage.class);
+                                    AddPersonRequest addPersonRequest = mapVisitorToAddPerson(visitorMsg);
+                                    AddPersonResponse addPersonResponse = personService.addPerson(addPersonRequest);
+                                    logger.info("✅ addPerson API called. Response: {}", addPersonResponse);
+                                } catch (Exception ex) {
+                                    logger.error("❌ Error processing vms.addVisitor message: {}", ex.getMessage(), ex);
+                                }
                             } else {
-                                logger.debug("Received message: {}", text);
+                                logger.debug("⚠️ Received message: {}", text);
                             }
                         }
                     } catch (JMSException e) {
-                        logger.error("Error getting text from message: {}", e.getMessage(), e);
+                        logger.error("❌ Error getting text from message: {}", e.getMessage(), e);
                     }
                 } else {
-                    logger.warn("Received non-text JMS message: {}", message);
+                    logger.warn("⚠️ Received non-text JMS message: {}", message);
                 }
             });
         } catch (JMSException e) {
-            logger.error("Error connecting to MQ: {}", e.getMessage(), e);
+            logger.error("❌ Error connecting to MQ: {}", e.getMessage(), e);
         } catch (Exception e) {
-            logger.error("Unexpected error in listenToMq: {}", e.getMessage(), e);
+            logger.error("❌ Unexpected error in listenToMq: {}", e.getMessage(), e);
         }
+    }
+
+    // AGENT: Map VmsAddVisitorMessage to AddPersonRequest (minimal, all required fields for /obms/api/v1.1/acs/person)
+    private AddPersonRequest mapVisitorToAddPerson(VmsAddVisitorMessage visitorMsg) {
+        AddPersonRequest req = new AddPersonRequest();
+
+        // --- baseInfo (required) ---
+        AddPersonRequest.BaseInfo baseInfo = new AddPersonRequest.BaseInfo();
+        baseInfo.setPersonId(visitorMsg.getInfo() != null ? visitorMsg.getInfo().getVisitorId() : "unknown");
+        baseInfo.setFirstName(visitorMsg.getInfo() != null ? visitorMsg.getInfo().getVisitorName() : "Visitor");
+        baseInfo.setGender(visitorMsg.getInfo() != null ? visitorMsg.getInfo().getStatus() : "0"); // fallback to "0" (unknown)
+        baseInfo.setOrgCode(visitorMsg.getInfo() != null ? visitorMsg.getInfo().getVisitorOrgName() : "001");
+        req.setBaseInfo(baseInfo);
+
+        // --- extensionInfo (required) ---
+        AddPersonRequest.ExtensionInfo extensionInfo = new AddPersonRequest.ExtensionInfo();
+        extensionInfo.setIdType(visitorMsg.getInfo() != null ? visitorMsg.getInfo().getIdType() : "0");
+        extensionInfo.setNationalityId("9999");
+        req.setExtensionInfo(extensionInfo);
+
+        // --- authenticationInfo (required) ---
+        AddPersonRequest.AuthenticationInfo authenticationInfo = new AddPersonRequest.AuthenticationInfo();
+        authenticationInfo.setStartTime(String.valueOf(System.currentTimeMillis() / 1000)); // now (seconds)
+        authenticationInfo.setEndTime("2026915199"); // year 2034
+        req.setAuthenticationInfo(authenticationInfo);
+
+        // --- accessInfo (required) ---
+        AddPersonRequest.AccessInfo accessInfo = new AddPersonRequest.AccessInfo();
+        accessInfo.setAccessType("0"); // Normal
+        req.setAccessInfo(accessInfo);
+
+        // --- faceComparisonInfo (required) ---
+        AddPersonRequest.FaceComparisonInfo faceComparisonInfo = new AddPersonRequest.FaceComparisonInfo();
+        faceComparisonInfo.setEnableFaceComparisonGroup("1");
+        req.setFaceComparisonInfo(faceComparisonInfo);
+
+        return req;
     }
 
     @PreDestroy
@@ -125,7 +185,7 @@ public class MqSubscriberService {
                 connection.close();
             }
         } catch (JMSException e) {
-            logger.error("Error closing JMS resources: {}", e.getMessage(), e);
+            logger.error("❌ Error closing JMS resources: {}", e.getMessage(), e);
         }
     }
 
