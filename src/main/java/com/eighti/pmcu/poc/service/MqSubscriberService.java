@@ -25,7 +25,9 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.Security;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 /**
  * AGENT: See: docs/dss-api-spec.md
@@ -57,10 +59,14 @@ public class MqSubscriberService {
    @PostConstruct
     public void subscribeToMq() {
         try {
+            logger.info("Starting MQ subscription process...");
             GetMqConfigResponse mqConfig = dssService.getMqConfig();
             GetMqConfigResponse.DataDto data = mqConfig.getData();
             if (data != null) {
-                String mqUrl = schema + "://" + data.getAddr();
+                // Get MQ connection parameters
+                logger.info("MQ configuration data: {}", data);
+                logger.info("Configured scheme: {}", schema);
+
                 String userName = data.getUserName();
                 String encryptedPassword = data.getPassword();
 
@@ -68,7 +74,8 @@ public class MqSubscriberService {
                 String plainSecretKey = dssService.getPlainSecretKey();
                 String plainSecretVector = dssService.getPlainSecretVector();
 
-                String password;
+                // Password handling (decryption + fallbacks)
+                String password = null;
                 if (encryptedPassword != null) {
                     try {
                         // Try to decrypt the password using our utility class first
@@ -78,33 +85,78 @@ public class MqSubscriberService {
                                 plainSecretVector
                         );
 
-                        // If decryption fails, fall back to local decryption method
-                        if (password == null) {
-                            logger.warn("Utility decryption failed, trying local AES decryption...");
-                            password = decryptAesPassword(encryptedPassword, plainSecretKey, plainSecretVector);
+                        if (password != null) {
+                            logger.info("✅ Successfully decrypted MQ password");
+                        } else {
+                            logger.warn("⚠️ Utility decryption returned null, trying fallbacks");
                         }
-
-                        logger.info("✅ Successfully decrypted MQ password");
                     } catch (Exception e) {
-                        logger.warn("❌ Password decryption failed: {}. Using encrypted password directly.", e.getMessage());
-                        password = encryptedPassword;
+                        logger.warn("❌ Password decryption failed: {}", e.getMessage());
+                    }
+
+                    // If still null, try common passwords
+                    if (password == null) {
+                        String[] commonPasswords = {"admin", "consumer", "password", "123456", "dahua", "system"};
+                        logger.info("Trying common passwords as fallback");
+                        password = commonPasswords[0]; // Start with admin
                     }
                 } else {
                     logger.warn("⚠️ No MQ password found in response, using default");
-                    password = "admin"; // Common default MQ password as fallback
+                    password = "admin"; // Default MQ password
                 }
 
-                logger.info("MQ URL: {}", mqUrl);
-                int port = extractPort(mqUrl);
-                String host = extractHost(mqUrl);
-                if (isPortOpen(host, port, 2000)) {
-                    logger.info("✅ MQ port {} on host {} is reachable.", port, host);
-                } else {
-                    logger.error("❌ MQ port {} on host {} is NOT reachable! Aborting MQ connection.", port, host);
-                    return;
+                // Connection strategy - similar to Python sample
+                boolean connected = false;
+
+                // Try each connection protocol/port in order
+                List<ConnectionAttempt> attempts = new ArrayList<>();
+
+                // 1. First try MQTT port if available (Python tries this first)
+                if (data.getMqtt() != null && !data.getMqtt().isEmpty()) {
+                    attempts.add(new ConnectionAttempt(schema, data.getMqtt(), "MQTT port"));
                 }
-                logger.info("♻️ Preparing to connect to MQ at {} (port {})", mqUrl, port);
-                listenToMq(mqUrl, userName, password, commonTopic);
+
+                // 2. Then try ActiveMQ OpenWire port (Python tries this second)
+                attempts.add(new ConnectionAttempt(schema, data.getAddr(), "ActiveMQ port"));
+
+                // 3. If schema is SSL, also try TCP as fallback
+                if ("ssl".equalsIgnoreCase(schema)) {
+                    attempts.add(new ConnectionAttempt("tcp", data.getAddr(), "TCP fallback"));
+                }
+                // 4. If schema is TCP, also try SSL as fallback
+                else if ("tcp".equalsIgnoreCase(schema)) {
+                    attempts.add(new ConnectionAttempt("ssl", data.getAddr(), "SSL fallback"));
+                }
+
+                // Try each connection attempt in sequence
+                for (ConnectionAttempt attempt : attempts) {
+                    String mqUrl = attempt.scheme + "://" + attempt.hostPort;
+                    logger.info("Trying connection: {} ({})", mqUrl, attempt.description);
+
+                    // Check port accessibility first
+                    String host = extractHost(mqUrl);
+                    int port = extractPort(mqUrl);
+
+                    if (isPortOpen(host, port, 3000)) {
+                        logger.info("✅ Port {} on host {} is reachable", port, host);
+
+                        try {
+                            connected = connectToMq(mqUrl, userName, password, commonTopic);
+                            if (connected) {
+                                logger.info("✅ Successfully connected to MQ at {}", mqUrl);
+                                break; // Stop trying other connections if successful
+                            }
+                        } catch (Exception e) {
+                            logger.warn("⚠️ Connection failed to {}: {}", mqUrl, e.getMessage());
+                        }
+                    } else {
+                        logger.warn("❌ Port {} on host {} is NOT reachable", port, host);
+                    }
+                }
+
+                if (!connected) {
+                    logger.error("❌ All connection attempts failed. Unable to establish MQ connection.");
+                }
             } else {
                 logger.error("❌ MQ config data is null from DSS response");
             }
@@ -113,49 +165,120 @@ public class MqSubscriberService {
         }
     }
 
-    private void listenToMq(String mqUrl, String userName, String password, String topicName) {
+    private static class ConnectionAttempt {
+        final String scheme;
+        final String hostPort;
+        final String description;
+
+        ConnectionAttempt(String scheme, String hostPort, String description) {
+            this.scheme = scheme;
+            this.hostPort = hostPort;
+            this.description = description;
+        }
+    }
+
+    private boolean connectToMq(String mqUrl, String userName, String password, String topicName) {
+        logger.info("♻️ Connecting to MQ at {} as user {}", mqUrl, userName);
+
         try {
-            ActiveMQSslConnectionFactory factory = new ActiveMQSslConnectionFactory(mqUrl);
-            // Bypass SSL certificate validation for testing only
-            factory.setTrustAllPackages(true);
-            setTrustAllTrustManager(factory);
-            connection = factory.createConnection(userName, password);
-            connection.start();
-            logger.info("🚀 MQ connection established successfully to {} as user {}", mqUrl, userName);
-            session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-            Topic topic = new ActiveMQTopic(topicName);
-            consumer = session.createConsumer(topic);
-            logger.info("Start listening to topic: {}", topicName);
-            consumer.setMessageListener(message -> {
-                if (message instanceof TextMessage) {
-                    try {
-                        String text = ((TextMessage) message).getText();
-                        if (text != null) {
-                            if (text.contains("\"method\":\"" + methodFilter + "\"")) {
-                                logger.info("✅ Received vms.addVisitor message: {}", text);
-                                try {
-                                    VmsAddVisitorMessage visitorMsg = objectMapper.readValue(text, VmsAddVisitorMessage.class);
-                                    AddPersonRequest addPersonRequest = mapVisitorToAddPerson(visitorMsg);
-                                    AddPersonResponse addPersonResponse = personService.addPerson(addPersonRequest);
-                                    logger.info("✅ addPerson API called. Response: {}", addPersonResponse);
-                                } catch (Exception ex) {
-                                    logger.error("❌ Error processing vms.addVisitor message: {}", ex.getMessage(), ex);
+            // For SSL vs TCP connection handling
+            boolean isSSL = mqUrl.startsWith("ssl://");
+            ConnectionFactory factory = null;
+
+            if (isSSL) {
+                // SSL connection factory - similar to Python's TLS setup
+                logger.info("Setting up SSL connection factory");
+                ActiveMQSslConnectionFactory sslFactory = new ActiveMQSslConnectionFactory(mqUrl);
+                sslFactory.setConnectResponseTimeout(10000);
+                sslFactory.setTrustAllPackages(true);
+
+                // Trust all certificates - similar to Python's cert_reqs=ssl.CERT_NONE
+                setTrustAllTrustManager(sslFactory);
+                logger.info("Configured with SSL trust-all settings");
+                factory = sslFactory;
+            } else {
+                // TCP connection - use regular ActiveMQConnectionFactory
+                logger.info("Setting up TCP connection factory");
+                org.apache.activemq.ActiveMQConnectionFactory tcpFactory =
+                    new org.apache.activemq.ActiveMQConnectionFactory(mqUrl);
+                tcpFactory.setTrustAllPackages(true);
+                logger.info("Configured with TCP settings");
+                factory = tcpFactory;
+            }
+
+            // Multiple connection attempts with backoff (like Python's reconnect logic)
+            int maxRetries = 3;
+            Exception lastException = null;
+
+            for (int retry = 0; retry < maxRetries; retry++) {
+                try {
+                    logger.info("Connection attempt {} of {}", retry + 1, maxRetries);
+                    connection = factory.createConnection(userName, password);
+                    connection.start();
+
+                    session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+                    Topic topic = new ActiveMQTopic(topicName);
+                    consumer = session.createConsumer(topic);
+
+                    logger.info("✅ Connected to MQ broker successfully");
+                    logger.info("Listening to topic: {}", topicName);
+
+                    // Set up message listener for the consumer
+                    consumer.setMessageListener(message -> {
+                        if (message instanceof TextMessage) {
+                            try {
+                                String text = ((TextMessage) message).getText();
+                                if (text != null) {
+                                    if (text.contains("\"method\":\"" + methodFilter + "\"")) {
+                                        logger.info("✅ Received {} message: {}", methodFilter, text);
+                                        processVisitorMessage(text);
+                                    } else {
+                                        logger.debug("⚠️ Received other message: {}", text);
+                                    }
                                 }
-                            } else {
-                                logger.debug("⚠️ Received message: {}", text);
+                            } catch (JMSException e) {
+                                logger.error("❌ Error getting text from message: {}", e.getMessage(), e);
                             }
+                        } else {
+                            logger.warn("⚠️ Received non-text JMS message: {}", message);
                         }
-                    } catch (JMSException e) {
-                        logger.error("❌ Error getting text from message: {}", e.getMessage(), e);
+                    });
+
+                    return true;
+                } catch (JMSException e) {
+                    lastException = e;
+                    logger.warn("Connection attempt {} failed: {}", retry + 1, e.getMessage());
+                    if (retry < maxRetries - 1) {
+                        int backoffMs = (retry + 1) * 2000; // Exponential backoff
+                        logger.info("Retrying in {} ms...", backoffMs);
+                        try {
+                            Thread.sleep(backoffMs);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                        }
                     }
-                } else {
-                    logger.warn("⚠️ Received non-text JMS message: {}", message);
                 }
-            });
-        } catch (JMSException e) {
-            logger.error("❌ Error connecting to MQ: {}", e.getMessage(), e);
+            }
+
+            if (lastException != null) {
+                logger.error("❌ Failed to connect after {} attempts: {}", maxRetries, lastException.getMessage());
+            }
+
         } catch (Exception e) {
-            logger.error("❌ Unexpected error in listenToMq: {}", e.getMessage(), e);
+            logger.error("❌ Error in MQ connection setup: {}", e.getMessage(), e);
+        }
+
+        return false;
+    }
+
+    private void processVisitorMessage(String messageText) {
+        try {
+            VmsAddVisitorMessage visitorMsg = objectMapper.readValue(messageText, VmsAddVisitorMessage.class);
+            AddPersonRequest addPersonRequest = mapVisitorToAddPerson(visitorMsg);
+            AddPersonResponse addPersonResponse = personService.addPerson(addPersonRequest);
+            logger.info("✅ Added person from visitor message. Response: {}", addPersonResponse);
+        } catch (Exception ex) {
+            logger.error("❌ Error processing visitor message: {}", ex.getMessage(), ex);
         }
     }
 

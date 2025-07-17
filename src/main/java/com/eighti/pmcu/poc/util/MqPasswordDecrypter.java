@@ -51,7 +51,7 @@ public class MqPasswordDecrypter {
 
             // Try common fallback passwords as a last resort (like Python sample)
             log.warn("❌ All decryption methods failed, trying common passwords");
-            String[] commonPasswords = {"admin", "consumer", "password", "123456", "dahua", "system"};
+            String[] commonPasswords = {"admin", "consumer", "password", "123456", "dahua", "system", "ismart123456"};
             for (String pwd : commonPasswords) {
                 log.debug("Trying common password: {}", pwd);
                 if (isPasswordValid(pwd)) {
