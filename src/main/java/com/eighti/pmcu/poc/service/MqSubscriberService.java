@@ -54,7 +54,7 @@ public class MqSubscriberService {
     private Session session;
     private MessageConsumer consumer;
 
-    @PostConstruct
+   // @PostConstruct
     public void subscribeToMq() {
         try {
             GetMqConfigResponse mqConfig = dssService.getMqConfig();
@@ -92,9 +92,7 @@ public class MqSubscriberService {
             // Bypass SSL certificate validation for testing only
             factory.setTrustAllPackages(true);
             setTrustAllTrustManager(factory);
-            factory.setUserName(userName);
-            factory.setPassword(password);
-            connection = factory.createConnection();
+            connection = factory.createConnection(userName, password);
             connection.start();
             logger.info("🚀 MQ connection established successfully to {} as user {}", mqUrl, userName);
             session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);

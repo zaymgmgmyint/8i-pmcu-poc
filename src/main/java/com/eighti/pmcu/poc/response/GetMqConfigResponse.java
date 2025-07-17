@@ -36,8 +36,8 @@ public class GetMqConfigResponse {
         private String wss;
         @Schema(description = "Openwire protocol address (PC)", example = "192.168.1.1:61616")
         private String addr;
-        @Schema(description = "Encrypted MQ password (AES)", accessMode = Schema.AccessMode.WRITE_ONLY)
-        @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
+        @Schema(description = "Encrypted MQ password (AES)", example = "b48891f8dd49d3d8e3138763a1505aaf353479dd5ecdb9d72a52a99b12a29d88")
+        @JsonProperty(value = "password")
         private String password;
     }
 }

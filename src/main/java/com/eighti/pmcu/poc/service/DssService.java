@@ -7,6 +7,8 @@ import com.eighti.pmcu.poc.request.SecondLoginRequest;
 import com.eighti.pmcu.poc.response.FirstLoginResponse;
 import com.eighti.pmcu.poc.response.GetMqConfigResponse;
 import com.eighti.pmcu.poc.response.SecondLoginResponse;
+import com.eighti.pmcu.poc.util.MqPasswordDecrypter;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,6 +19,8 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -86,16 +90,45 @@ public class DssService {
 
             if (responseEntity.getStatusCode().is2xxSuccessful()) {
                 FirstLoginResponse response = responseEntity.getBody();
+                log.info("✅ Response body: {}", response);
                 log.info("✅ First login successful for user: {}. Status: {}", userName, responseEntity.getStatusCode());
                 return response;
+            } else if (responseEntity.getStatusCode().value() == 401) {
+                // For 401, we extract the challenge payload (realm, randomKey, publicKey)
+                // This works because our custom RestTemplate error handler allows 401 responses
+                FirstLoginResponse response = responseEntity.getBody();
+                // Debug: log headers and raw body for troubleshooting
+                log.warn("401 headers: {}", responseEntity.getHeaders());
+                try {
+                    // Try to log the raw response as String for debugging
+                    ResponseEntity<String> rawResponse = restTemplate.exchange(
+                        url,
+                        HttpMethod.POST,
+                        requestEntity,
+                        String.class
+                    );
+                    log.warn("401 raw body as String: {}", rawResponse.getBody());
+                } catch (Exception ex) {
+                    log.warn("Could not log raw 401 body as String: {}", ex.getMessage());
+                }
+                if (response != null) {
+                    log.info("✅ First login returned challenge payload. Status: {}", responseEntity.getStatusCode());
+                    log.debug("Challenge payload: {}", response);
+                    return response;
+                } else {
+                    log.warn("❌ First login returned 401 but no challenge payload. User: {}", userName);
+                    throw new DssServiceException("First login failed: 401 Unauthorized with no challenge payload", null);
+                }
             } else {
                 log.warn("❌ First login failed for user: {}. Status: {}, Response: {}", userName, responseEntity.getStatusCode(), responseEntity);
                 throw new DssServiceException("First login failed: " + responseEntity.getStatusCode(), null);
             }
 
+        // This catch block should only execute if RestTemplate error handler isn't working properly
+        // or for connection issues, since 401 responses should be handled above
         } catch (org.springframework.web.client.HttpClientErrorException e) {
             if (e.getStatusCode() == HttpStatus.UNAUTHORIZED) {
-                log.error("❌ 401 Unauthorized. DSS response body: {}", e.getResponseBodyAsString());
+                log.error("❌ 401 Unauthorized slipped through error handler. DSS response body: {}", e.getResponseBodyAsString());
             }
             log.error("❌ HTTP error during first login request to DSS for user: {}. Status: {}, Response: {}", userName, e.getStatusCode(), e.getResponseBodyAsString(), e);
             throw new DssServiceException("HTTP error during first login request to DSS: " + e.getStatusCode(), e);
@@ -125,9 +158,14 @@ public class DssService {
             String plainSecretVector = generateRandomAlphaNum(16);
             String base64SecretKey = Base64.getEncoder().encodeToString(plainSecretKey.getBytes());
             String base64SecretVector = Base64.getEncoder().encodeToString(plainSecretVector.getBytes());
-            // Store for MQ decryption
+
+            // FIXED: Store the base64-encoded values directly for MQ decryption
+            // These are the actual values sent to the server and needed for decryption
             this.lastPlainSecretKey = base64SecretKey;
             this.lastPlainSecretVector = base64SecretVector;
+
+            log.debug("SecretKey for decryption: {}", base64SecretKey);
+            log.debug("SecretVector for decryption: {}", base64SecretVector);
 
             // Step 3: Create the second login request (to /accounts/authorize)
             String url = baseUrl + "/brms/api/v1.0/accounts/authorize";
@@ -141,13 +179,16 @@ public class DssService {
             secondLoginRequest.setSignature(signature);
             secondLoginRequest.setUserName(userName);
             secondLoginRequest.setRandomKey(randomKey);
-            secondLoginRequest.setPublicKey(""); // Per docs, can be empty
+            secondLoginRequest.setPublicKey(publicKey); // Per docs, can be empty
             secondLoginRequest.setEncryptType("MD5");
             secondLoginRequest.setIpAddress(clientIp);
             secondLoginRequest.setClientType(clientType);
             secondLoginRequest.setUserType("0"); // 0: System user
             secondLoginRequest.setSecretKey(base64SecretKey);
             secondLoginRequest.setSecretVector(base64SecretVector);
+            secondLoginRequest.setAuthorityType("0"); // Default authority type
+
+            log.info("Second login request: {}", secondLoginRequest.toString());
 
             HttpEntity<SecondLoginRequest> requestEntity = new HttpEntity<>(secondLoginRequest, headers);
 
@@ -162,8 +203,13 @@ public class DssService {
             );
 
             SecondLoginResponse response = responseEntity.getBody();
-            // Optionally, store plainSecretKey and plainSecretVector for MQ decryption
-            log.info("✅ Second login successful for user: {}. Status: {}", userName, responseEntity.getStatusCode());
+            if (response != null && response.getToken() != null) {
+                // Store token for keep-alive and other authenticated requests
+                currentToken.set(response.getToken());
+                log.info("✅ Second login successful for user: {}. Status: {}. Token stored.", userName, responseEntity.getStatusCode());
+            } else {
+                log.warn("⚠️ Second login successful but no token received");
+            }
             return response;
 
         } catch (org.springframework.web.client.HttpClientErrorException e) {
@@ -223,13 +269,19 @@ public class DssService {
     // Getting the MQ Config from DSS Endpoint
     public GetMqConfigResponse getMqConfig() {
         try {
+            // Check if we already have a valid token
+            String token = currentToken.get();
 
-            SecondLoginResponse secondLoginResponse = secondLogin();
-            String token = secondLoginResponse.getToken();
-
+            // If no token exists, perform full login
             if (token == null) {
-                log.error("❌ Failed to get token from DSS");
-                throw new DssServiceException("Failed to get token from DSS", null);
+                log.info("No existing token, performing full login sequence");
+                SecondLoginResponse secondLoginResponse = secondLogin();
+                token = secondLoginResponse.getToken();
+
+                if (token == null) {
+                    log.error("❌ Failed to get token from DSS");
+                    throw new DssServiceException("Failed to get token from DSS", null);
+                }
             }
 
             String url = baseUrl + "/brms/api/v1.0/BRM/Config/GetMqConfig";
@@ -237,17 +289,97 @@ public class DssService {
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set("X-Subject-Token", token);
 
-            HttpEntity<Void> requestEntity = new HttpEntity<>(headers);
+            // Use an empty map which Jackson will serialize to {}
+            HttpEntity<Map<String,Object>> requestEntity =
+                    new HttpEntity<>(Collections.emptyMap(), headers);
 
-            ResponseEntity<GetMqConfigResponse> responseEntity = restTemplate.exchange(
-                    url,
-                    HttpMethod.POST,
-                    requestEntity,
-                    GetMqConfigResponse.class
-            );
-            return responseEntity.getBody();
+            log.info("Getting MQ config from DSS at {}", url);
+
+            try {
+                ResponseEntity<GetMqConfigResponse> responseEntity = restTemplate.exchange(
+                        url,
+                        HttpMethod.POST,
+                        requestEntity,
+                        GetMqConfigResponse.class
+                );
+
+                GetMqConfigResponse response = responseEntity.getBody();
+                log.info("Response from DSS: {}", response);
+                log.info("✅ Retrieved raw MQ config. Status: {}", responseEntity.getStatusCode());
+
+                // Attempt to decrypt password if present
+                if (response != null && response.getData() != null && response.getData().getPassword() != null) {
+                    String encryptedPassword = response.getData().getPassword();
+                    log.info("Encrypted MQ password found: {}", encryptedPassword);
+
+                    // Try to decrypt the password using our utility
+                    String decryptedPassword = MqPasswordDecrypter.decryptMqPassword(
+                            encryptedPassword,
+                            lastPlainSecretKey,
+                            lastPlainSecretVector
+                    );
+
+                    if (decryptedPassword != null) {
+                        log.info("✅ Successfully decrypted MQ password");
+                        // Update the password in the response object
+                        response.getData().setPassword(decryptedPassword);
+                    } else {
+                        log.warn("⚠️ Failed to decrypt MQ password - returning original encrypted value");
+                    }
+                } else {
+                    log.warn("⚠️ No MQ password found in response");
+                }
+
+                log.info("✅ Successfully processed MQ config");
+                return response;
+
+            } catch (org.springframework.web.client.HttpClientErrorException e) {
+                // Handle case where token might have expired
+                if (e.getStatusCode() == HttpStatus.UNAUTHORIZED) {
+                    log.warn("Token expired or invalid, performing new login");
+                    // Try again with a fresh token
+                    SecondLoginResponse secondLoginResponse = secondLogin();
+                    token = secondLoginResponse.getToken();
+
+                    // Update headers with new token
+                    headers.set("X-Subject-Token", token);
+                    requestEntity = new HttpEntity<>(Collections.emptyMap(), headers);
+
+                    // Retry the request
+                    ResponseEntity<GetMqConfigResponse> responseEntity = restTemplate.exchange(
+                            url,
+                            HttpMethod.POST,
+                            requestEntity,
+                            GetMqConfigResponse.class
+                    );
+
+                    GetMqConfigResponse response = responseEntity.getBody();
+
+                    // Attempt to decrypt password after token refresh
+                    if (response != null && response.getData() != null && response.getData().getPassword() != null) {
+                        String encryptedPassword = response.getData().getPassword();
+                        String decryptedPassword = MqPasswordDecrypter.decryptMqPassword(
+                                encryptedPassword,
+                                lastPlainSecretKey,
+                                lastPlainSecretVector
+                        );
+
+                        if (decryptedPassword != null) {
+                            log.info("✅ Successfully decrypted MQ password after token refresh");
+                            response.getData().setPassword(decryptedPassword);
+                        }
+                    }
+
+                    log.info("✅ Successfully retrieved MQ config after token refresh. Status: {}", responseEntity.getStatusCode());
+                    return response;
+                } else {
+                    // Other HTTP error
+                    log.error("❌ HTTP error getting MQ config. Status: {}, Response: {}", e.getStatusCode(), e.getResponseBodyAsString());
+                    throw new DssServiceException("HTTP error getting MQ config: " + e.getStatusCode(), e);
+                }
+            }
         } catch (RestClientException e) {
-            log.error("Error getting MQ config", e);
+            log.error("❌ Error getting MQ config", e);
             throw new DssServiceException("Error getting MQ config", e);
         }
     }

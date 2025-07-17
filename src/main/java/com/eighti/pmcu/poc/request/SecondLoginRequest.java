@@ -2,9 +2,11 @@ package com.eighti.pmcu.poc.request;
 
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
 
 @Data
 @NoArgsConstructor
+@ToString
 public class SecondLoginRequest {
 
     private String mac;
