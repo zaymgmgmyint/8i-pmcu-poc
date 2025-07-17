@@ -54,7 +54,7 @@ public class MqSubscriberService {
     private Session session;
     private MessageConsumer consumer;
 
-   // @PostConstruct
+   @PostConstruct
     public void subscribeToMq() {
         try {
             GetMqConfigResponse mqConfig = dssService.getMqConfig();
@@ -63,10 +63,37 @@ public class MqSubscriberService {
                 String mqUrl = schema + "://" + data.getAddr();
                 String userName = data.getUserName();
                 String encryptedPassword = data.getPassword();
-                // Use the plain secretKey and secretVector generated during second login (not the encrypted ones from the response)
-                String secretKey = dssService.getPlainSecretKey();
-                String secretVector = dssService.getPlainSecretVector();
-                String password = decryptAesPassword(encryptedPassword, secretKey, secretVector);
+
+                // Get the plaintext keys stored during login for decryption
+                String plainSecretKey = dssService.getPlainSecretKey();
+                String plainSecretVector = dssService.getPlainSecretVector();
+
+                String password;
+                if (encryptedPassword != null) {
+                    try {
+                        // Try to decrypt the password using our utility class first
+                        password = com.eighti.pmcu.poc.util.MqPasswordDecrypter.decryptMqPassword(
+                                encryptedPassword,
+                                plainSecretKey,
+                                plainSecretVector
+                        );
+
+                        // If decryption fails, fall back to local decryption method
+                        if (password == null) {
+                            logger.warn("Utility decryption failed, trying local AES decryption...");
+                            password = decryptAesPassword(encryptedPassword, plainSecretKey, plainSecretVector);
+                        }
+
+                        logger.info("✅ Successfully decrypted MQ password");
+                    } catch (Exception e) {
+                        logger.warn("❌ Password decryption failed: {}. Using encrypted password directly.", e.getMessage());
+                        password = encryptedPassword;
+                    }
+                } else {
+                    logger.warn("⚠️ No MQ password found in response, using default");
+                    password = "admin"; // Common default MQ password as fallback
+                }
+
                 logger.info("MQ URL: {}", mqUrl);
                 int port = extractPort(mqUrl);
                 String host = extractHost(mqUrl);

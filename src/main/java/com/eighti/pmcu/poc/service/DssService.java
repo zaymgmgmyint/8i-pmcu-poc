@@ -77,8 +77,8 @@ public class DssService {
         HttpEntity<FirstLoginRequest> requestEntity = new HttpEntity<>(authRequest, headers);
 
         log.info("Initiating first login request to DSS at {} for user: {}", url, userName);
-        log.debug("Request body: {}", authRequest);
-        log.debug("Request headers: {}", headers.toSingleValueMap());
+        log.info("Request body: {}", authRequest);
+        log.info("Request headers: {}", headers.toSingleValueMap());
 
         try {
             ResponseEntity<FirstLoginResponse> responseEntity = restTemplate.exchange(
@@ -113,7 +113,7 @@ public class DssService {
                 }
                 if (response != null) {
                     log.info("✅ First login returned challenge payload. Status: {}", responseEntity.getStatusCode());
-                    log.debug("Challenge payload: {}", response);
+                    log.info("Challenge payload: {}", response);
                     return response;
                 } else {
                     log.warn("❌ First login returned 401 but no challenge payload. User: {}", userName);
@@ -156,16 +156,21 @@ public class DssService {
             // Step 2.1: Generate random secretKey (32 chars) and secretVector (16 chars)
             String plainSecretKey = generateRandomAlphaNum(32);
             String plainSecretVector = generateRandomAlphaNum(16);
-            String base64SecretKey = Base64.getEncoder().encodeToString(plainSecretKey.getBytes());
-            String base64SecretVector = Base64.getEncoder().encodeToString(plainSecretVector.getBytes());
 
-            // FIXED: Store the base64-encoded values directly for MQ decryption
-            // These are the actual values sent to the server and needed for decryption
-            this.lastPlainSecretKey = base64SecretKey;
-            this.lastPlainSecretVector = base64SecretVector;
+            // FIXED: Store plaintext keys for later decryption
+            this.lastPlainSecretKey = plainSecretKey;
+            this.lastPlainSecretVector = plainSecretVector;
 
-            log.debug("SecretKey for decryption: {}", base64SecretKey);
-            log.debug("SecretVector for decryption: {}", base64SecretVector);
+            log.info("Generated plain secretKey: {}", plainSecretKey);
+            log.info("Generated plain secretVector: {}", plainSecretVector);
+
+            // Step 2.2: RSA encrypt the plaintext secretKey and secretVector with DSS publicKey
+            // This matches what the Python sample does
+            String encryptedSecretKey = rsaEncryptWithDssPublicKey(plainSecretKey, publicKey);
+            String encryptedSecretVector = rsaEncryptWithDssPublicKey(plainSecretVector, publicKey);
+
+            log.info("RSA-encrypted secretKey: {}", encryptedSecretKey);
+            log.info("RSA-encrypted secretVector: {}", encryptedSecretVector);
 
             // Step 3: Create the second login request (to /accounts/authorize)
             String url = baseUrl + "/brms/api/v1.0/accounts/authorize";
@@ -184,8 +189,9 @@ public class DssService {
             secondLoginRequest.setIpAddress(clientIp);
             secondLoginRequest.setClientType(clientType);
             secondLoginRequest.setUserType("0"); // 0: System user
-            secondLoginRequest.setSecretKey(base64SecretKey);
-            secondLoginRequest.setSecretVector(base64SecretVector);
+            // Send the RSA-encrypted values, not base64-encoded plaintext
+            secondLoginRequest.setSecretKey(encryptedSecretKey);
+            secondLoginRequest.setSecretVector(encryptedSecretVector);
             secondLoginRequest.setAuthorityType("0"); // Default authority type
 
             log.info("Second login request: {}", secondLoginRequest.toString());
@@ -203,6 +209,7 @@ public class DssService {
             );
 
             SecondLoginResponse response = responseEntity.getBody();
+            log.info("✅ Second login response: {}", response);
             if (response != null && response.getToken() != null) {
                 // Store token for keep-alive and other authenticated requests
                 currentToken.set(response.getToken());
@@ -218,6 +225,35 @@ public class DssService {
         } catch (RestClientException ex) {
             log.error("❌ Error during second login request to DSS for user: {}. Exception: {}", userName, ex.getMessage(), ex);
             throw new DssServiceException("Error during second login request to DSS", ex);
+        }
+    }
+
+    /**
+     * RSA encrypt data with DSS platform public key
+     * This replicates what the Python sample does with:
+     * rsa_key = serialization.load_der_public_key(base64.b64decode(publicKey))
+     * encrypted = rsa_key.encrypt(data, padding.PKCS1v15())
+     */
+    private String rsaEncryptWithDssPublicKey(String plaintext, String base64PublicKey) {
+        try {
+            // Decode the base64 public key from DSS
+            byte[] publicKeyBytes = Base64.getDecoder().decode(base64PublicKey);
+
+            // Create a public key object
+            java.security.spec.X509EncodedKeySpec keySpec = new java.security.spec.X509EncodedKeySpec(publicKeyBytes);
+            java.security.KeyFactory keyFactory = java.security.KeyFactory.getInstance("RSA");
+            java.security.PublicKey publicKey = keyFactory.generatePublic(keySpec);
+
+            // Create cipher and encrypt
+            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding");
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey);
+            byte[] encryptedBytes = cipher.doFinal(plaintext.getBytes());
+
+            // Return base64 encoded encrypted bytes
+            return Base64.getEncoder().encodeToString(encryptedBytes);
+        } catch (Exception e) {
+            log.error("RSA encryption failed: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to RSA encrypt with DSS public key", e);
         }
     }
 
