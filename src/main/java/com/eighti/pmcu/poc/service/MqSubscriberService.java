@@ -138,18 +138,7 @@ public class MqSubscriberService {
         }
     }
 
-    private static class ConnectionAttempt {
-        final String scheme;
-        final String hostPort;
-        final String description;
-
-        ConnectionAttempt(String scheme, String hostPort, String description) {
-            this.scheme = scheme;
-            this.hostPort = hostPort;
-            this.description = description;
-        }
-    }
-
+    // MQ connect function
     private boolean connectToMq(String mqUrl, String userName, String password, String topicName) {
         logger.info("♻️ Connecting to MQ at {} as user {}", mqUrl, userName);
 
@@ -325,6 +314,19 @@ public class MqSubscriberService {
             factory.setKeyAndTrustManagers(null, trustAllCerts, null);
         } catch (Exception e) {
             logger.warn("Could not set TrustAll TrustManager: {}", e.getMessage(), e);
+        }
+    }
+
+    // Helper class to hold connection attempt details
+    private static class ConnectionAttempt {
+        final String scheme;
+        final String hostPort;
+        final String description;
+
+        ConnectionAttempt(String scheme, String hostPort, String description) {
+            this.scheme = scheme;
+            this.hostPort = hostPort;
+            this.description = description;
         }
     }
 }
