@@ -21,7 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * AGENT: MQ Subscriber Service - matches Python implementation for DSS MQ integration
+ * MQ Subscriber Service - matches Python implementation for DSS MQ integration
  * See: docs/dss-api-spec.md, dss_api_sample.py, dss_mq_sample.py
  */
 @Service
@@ -88,7 +88,7 @@ public class MqSubscriberService {
                 boolean connected = false;
                 List<ConnectionAttempt> attempts = new ArrayList<>();
 
-                // AGENT: Try plain TCP first since SSL is failing
+                // Try plain TCP first since SSL is failing
                 attempts.add(new ConnectionAttempt("tcp", data.getAddr(), "ActiveMQ TCP"));
                 attempts.add(new ConnectionAttempt("tcp", data.getMqtt(), "MQTT TCP"));
                 if (data.getAmqp() != null && !data.getAmqp().isEmpty()) {

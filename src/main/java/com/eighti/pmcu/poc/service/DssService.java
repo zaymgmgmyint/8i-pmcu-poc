@@ -31,7 +31,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * AGENT: For DSS API integration
+ * For DSS API integration
  * See: docs/dss-api-spec.md, dss_api_sample.py, dss_mq_sample.py
  * See java implementation in docs/encryption_decryption.md
  */
@@ -170,80 +170,6 @@ public class DssService {
             headers.set("User-Agent", "Spring Boot Application/1.0");
             headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
 
-            SecondLoginRequest secondLoginRequest = new SecondLoginRequest();
-            secondLoginRequest.setSignature(signature);
-            secondLoginRequest.setUserName(userName);
-            secondLoginRequest.setRandomKey(randomKey);
-            secondLoginRequest.setEncryptType("MD5");
-            secondLoginRequest.setIpAddress(clientIp);
-            secondLoginRequest.setClientType(clientType);
-            secondLoginRequest.setPublicKey(publicKey);
-            secondLoginRequest.setUserType("0");
-
-            log.info("Second login request: {}", secondLoginRequest);
-
-            HttpEntity<SecondLoginRequest> requestEntity = new HttpEntity<>(secondLoginRequest, headers);
-
-            log.info("Initiating second login request to DSS at {} for user: {}", url, userName);
-
-            ResponseEntity<SecondLoginResponse> responseEntity = restTemplate.exchange(
-                    url,
-                    HttpMethod.POST,
-                    requestEntity,
-                    SecondLoginResponse.class
-            );
-
-            SecondLoginResponse response = responseEntity.getBody();
-            log.info("✅ Second login response: {}", response);
-
-            if (response != null && response.getToken() != null) {
-                // Store token for keep-alive and other authenticated requests
-                currentToken.set(response.getToken());
-
-                // CRITICAL FIX: Store secretKey/secretVector returned by DSS for MQ decryption
-                this.lastPlainSecretKey = response.getSecretKey();
-                this.lastPlainSecretVector = response.getSecretVector();
-
-                log.info("✅ Second login successful. Token stored.");
-                log.info("SecretKey from DSS: {}", this.lastPlainSecretKey != null ? "Present" : "NULL");
-                log.info("SecretVector from DSS: {}", this.lastPlainSecretVector != null ? "Present" : "NULL");
-            } else {
-                log.warn("⚠️ Second login successful but no token received");
-            }
-            return response;
-
-        } catch (org.springframework.web.client.HttpClientErrorException e) {
-            log.error("❌ HTTP error during second login request to DSS for user: {}. Status: {}, Response: {}", userName, e.getStatusCode(), e.getResponseBodyAsString(), e);
-            throw new DssServiceException("HTTP error during second login request to DSS: " + e.getStatusCode(), e);
-        } catch (RestClientException ex) {
-            log.error("❌ Error during second login request to DSS for user: {}. Exception: {}", userName, ex.getMessage(), ex);
-            throw new DssServiceException("Error during second login request to DSS", ex);
-        }
-    }
-
-    public SecondLoginResponse secondLogin1() {
-        try {
-            // Step 1: Perform first login to get realm, randomKey, and publicKey
-            FirstLoginResponse firstLoginResponse = firstLogin();
-            String realm = firstLoginResponse.getRealm();
-            String randomKey = firstLoginResponse.getRandomKey();
-            String publicKey = firstLoginResponse.getPublicKey();
-
-            // Step 2: Calculate signature as per Dahua API
-            String temp1 = md5(password);
-            String temp2 = md5(userName + temp1);
-            String temp3 = md5(temp2);
-            String temp4 = md5(userName + ":" + realm + ":" + temp3);
-            String signature = md5(temp4 + ":" + randomKey);
-
-            // Step 3: Create the second login request - MATCH Python implementation exactly
-            String url = baseUrl + "/brms/api/v1.0/accounts/authorize";
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("Accept-Language", "en");
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("User-Agent", "Spring Boot Application/1.0");
-            headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
-
             // Generate your own AES key + IV for MQ password decryption later
             byte[] aesKeyBytes    = new byte[32];  // 256-bit
             byte[] aesIvBytes     = new byte[16];  // 128-bit
@@ -262,7 +188,7 @@ public class DssService {
             String encryptedKey    = rsaEncryptWithDssPublicKey1(plainAesKey, publicKey);
             String encryptedVector = rsaEncryptWithDssPublicKey1(plainAesVector, publicKey);
 
-            // AGENT: Debug logging for encrypted keys
+            // Debug logging for encrypted keys
             log.info("🔐 Generated AES credentials:");
             log.info("Plain AES Key length: {} bytes", aesKeyBytes.length);
             log.info("Plain AES IV length: {} bytes", aesIvBytes.length);
@@ -406,6 +332,7 @@ public class DssService {
         }
     }
 
+    // MD5 hash function
     private String md5(String input) {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
@@ -429,7 +356,7 @@ public class DssService {
             // If no token exists, perform full login
             if (token == null) {
                 log.info("No existing token, performing full login sequence");
-                SecondLoginResponse secondLoginResponse = secondLogin1(); // AGENT: Use the correct method
+                SecondLoginResponse secondLoginResponse = secondLogin(); // Use the correct method
                 token = secondLoginResponse.getToken();
 
                 if (token == null) {
@@ -539,29 +466,6 @@ public class DssService {
         }
     }
 
-    private String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
-    }
-
-    /**
-     * Generate a random alphanumeric string of given length
-     */
-    private String generateRandomAlphaNum(int length) {
-        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                + "abcdefghijklmnopqrstuvwxyz"
-                + "0123456789";
-        SecureRandom rnd = new SecureRandom();
-        StringBuilder sb = new StringBuilder(length);
-        for (int i = 0; i < length; i++) {
-            sb.append(chars.charAt(rnd.nextInt(chars.length())));
-        }
-        return sb.toString();
-    }
-
     /**
      * Returns the last generated base64-encoded secretKey for MQ decryption
      */
@@ -576,7 +480,7 @@ public class DssService {
         return lastPlainSecretVector;
     }
 
-    // AGENT: Expose the current DSS session token for API calls
+    // Expose the current DSS session token for API calls
     public String getCurrentToken() {
         return currentToken.get();
     }

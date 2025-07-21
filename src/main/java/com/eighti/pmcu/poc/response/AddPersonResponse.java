@@ -4,8 +4,7 @@ import lombok.Data;
 import java.util.List;
 
 /**
- * AGENT: Minimal AddPersonResponse for POST /obms/api/v1.1/acs/person
- * Only required fields and nested classes included for POC.
+ * Minimal AddPersonResponse for POST /obms/api/v1.1/acs/person
  */
 @Data
 public class AddPersonResponse {
@@ -20,4 +19,3 @@ public class AddPersonResponse {
         private List<String> overstepPlateNos;
     }
 }
-

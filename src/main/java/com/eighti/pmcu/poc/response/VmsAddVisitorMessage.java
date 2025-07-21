@@ -3,7 +3,7 @@ package com.eighti.pmcu.poc.response;
 import lombok.Data;
 import java.util.List;
 
-// AGENT: DTO for vms.addVisitor MQ message, aligned with AddVisitorRequest and using Lombok
+// DTO for vms.addVisitor MQ message, aligned with AddVisitorRequest and using Lombok
 @Data
 public class VmsAddVisitorMessage {
     private String method;

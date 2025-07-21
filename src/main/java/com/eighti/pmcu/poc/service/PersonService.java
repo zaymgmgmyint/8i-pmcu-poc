@@ -12,7 +12,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 /**
- * AGENT: Minimal PersonService for addPerson API integration
+ * Minimal PersonService for addPerson API integration
  */
 @Slf4j
 @Service
@@ -25,7 +25,7 @@ public class PersonService {
     private final DssService dssService;
 
     public AddPersonResponse addPerson(AddPersonRequest req) {
-        // AGENT: Use the actual DSS session token for API calls
+        // Use the actual DSS session token for API calls
         String token = dssService.getCurrentToken();
         if (token == null) {
             log.error("❌ No DSS token available for addPerson");
@@ -56,10 +56,4 @@ public class PersonService {
             throw new DssServiceException("Error calling addPerson API", e);
         }
     }
-
-    // AGENT: Expose the current DSS session token from DssService
-    // (Add this method to DssService.java)
-    // public String getCurrentToken() {
-    //     return currentToken.get();
-    // }
 }

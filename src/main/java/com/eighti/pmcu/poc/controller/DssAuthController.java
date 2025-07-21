@@ -12,7 +12,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 
 /**
- * AGENT: See: docs/dss-api-spec.md
+ * See: docs/dss-api-spec.md
  */
 @Slf4j
 @RestController
@@ -30,7 +30,7 @@ public class DssAuthController {
     @GetMapping("/second-login")
     public SecondLoginResponse getSecondLogin() {
         log.info("Received request for DSS second login");
-        return dssService.secondLogin1();
+        return dssService.secondLogin();
     }
 
     @GetMapping("/mq-config")

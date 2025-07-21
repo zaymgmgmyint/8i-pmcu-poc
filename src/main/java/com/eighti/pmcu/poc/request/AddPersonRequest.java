@@ -3,8 +3,7 @@ package com.eighti.pmcu.poc.request;
 import lombok.Data;
 
 /**
- * AGENT: Minimal AddPersonRequest for POST /obms/api/v1.1/acs/person
- * Only required fields and nested classes included for POC.
+ * Minimal AddPersonRequest for POST /obms/api/v1.1/acs/person
  */
 @Data
 public class AddPersonRequest {
@@ -44,4 +43,3 @@ public class AddPersonRequest {
         private String enableFaceComparisonGroup;
     }
 }
-

@@ -1,4 +1,4 @@
-// AGENT: Updated RestTemplateConfig.java with SSL bypass and 401 error handler
+// Updated RestTemplateConfig.java with SSL bypass and 401 error handler
 package com.eighti.pmcu.poc.config;
 
 import org.apache.hc.client5.http.classic.HttpClient;
@@ -27,18 +27,18 @@ public class RestTemplateConfig {
     @Bean
     public RestTemplate restTemplate() {
         try {
-            // AGENT: Create SSL context that trusts all certificates
+            // Create SSL context that trusts all certificates
             SSLContext sslContext = SSLContextBuilder.create()
                     .loadTrustMaterial(TrustAllStrategy.INSTANCE)
                     .build();
 
-            // AGENT: Configure SSL socket factory to skip hostname verification
+            // Configure SSL socket factory to skip hostname verification
             SSLConnectionSocketFactory sslSocketFactory = SSLConnectionSocketFactoryBuilder.create()
                     .setSslContext(sslContext)
                     .setHostnameVerifier((hostname, session) -> true) // Skip hostname verification
                     .build();
 
-            // AGENT: Build HTTP client with custom SSL configuration
+            // Build HTTP client with custom SSL configuration
             HttpClient httpClient = HttpClientBuilder.create()
                     .setConnectionManager(
                             PoolingHttpClientConnectionManagerBuilder.create()
@@ -46,11 +46,11 @@ public class RestTemplateConfig {
                                     .build())
                     .build();
 
-            // AGENT: Create RestTemplate with custom HTTP client and error handler
+            // Create RestTemplate with custom HTTP client and error handler
             HttpComponentsClientHttpRequestFactory factory = new HttpComponentsClientHttpRequestFactory(httpClient);
             RestTemplate restTemplate = new RestTemplate(factory);
 
-            // AGENT: Custom error handler allows 401 responses through for challenge payload
+            // Custom error handler allows 401 responses through for challenge payload
             restTemplate.setErrorHandler(new ResponseErrorHandler() {
                 @Override
                 public boolean hasError(ClientHttpResponse response) throws IOException {
