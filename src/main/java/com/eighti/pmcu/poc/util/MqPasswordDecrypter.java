@@ -11,7 +11,9 @@ import java.util.Base64;
 
 /**
  * Utility class for decrypting MQ passwords from DSS responses
- * Matches the Python implementation in dss_api_sample.py
+ * Match with java implementation in docs/encryption_decryption.md
+ * See the Python implementation in docs/dss_mq_sample.py
+ *
  */
 @Slf4j
 public class MqPasswordDecrypter {
@@ -122,91 +124,79 @@ public class MqPasswordDecrypter {
     }
 
     /**
-     * Try AES decryption with different key derivation methods like in Python sample
+     * Try AES decryption approach - match Python implementation
      */
     private static String tryAesDecryption(String encryptedPassword, String secretKey, String secretVector) {
         try {
-            // Method 1: Use direct key bytes and iv bytes (first 32/16 bytes)
-            try {
-                byte[] keyData = Base64.getDecoder().decode(secretKey);
-                byte[] ivData = Base64.getDecoder().decode(secretVector);
+            // Convert hex string to byte array
+            byte[] encryptedBytes = hexStringToByteArray(encryptedPassword);
 
-                // Extract correct key size for AES-256
-                if (keyData.length >= 32 && ivData.length >= 16) {
+            // Method 1: Use base64-decoded secretKey and secretVector as raw AES key/IV
+            try {
+                byte[] keyBytes = Base64.getDecoder().decode(secretKey);
+                byte[] ivBytes = Base64.getDecoder().decode(secretVector);
+
+                // Ensure correct sizes: AES-256 needs 32-byte key, AES needs 16-byte IV
+                if (keyBytes.length == 32 && ivBytes.length == 16) {
+                    SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+                    IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
+
+                    Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+                    cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+                    byte[] decrypted = cipher.doFinal(encryptedBytes);
+                    String result = new String(decrypted);
+                    log.info("✅ AES method 1 successful");
+                    return result;
+                }
+            } catch (Exception e) {
+                log.debug("AES method 1 failed: {}", e.getMessage());
+            }
+
+            // Method 2: Try treating secretKey as hex-encoded AES key
+            try {
+                byte[] keyBytes = hexStringToByteArray(secretKey.substring(0, Math.min(64, secretKey.length()))); // 32 bytes = 64 hex chars
+                byte[] ivBytes = hexStringToByteArray(secretVector.substring(0, Math.min(32, secretVector.length()))); // 16 bytes = 32 hex chars
+
+                if (keyBytes.length >= 16 && ivBytes.length >= 16) {
+                    // Truncate to correct sizes if needed
                     byte[] aesKey = new byte[32];
                     byte[] aesIv = new byte[16];
-                    System.arraycopy(keyData, 0, aesKey, 0, 32);
-                    System.arraycopy(ivData, 0, aesIv, 0, 16);
+                    System.arraycopy(keyBytes, 0, aesKey, 0, Math.min(32, keyBytes.length));
+                    System.arraycopy(ivBytes, 0, aesIv, 0, Math.min(16, ivBytes.length));
 
                     SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
                     IvParameterSpec ivSpec = new IvParameterSpec(aesIv);
 
                     Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
                     cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
-
-                    byte[] encrypted = hexStringToByteArray(encryptedPassword);
-                    byte[] decrypted = cipher.doFinal(encrypted);
+                    byte[] decrypted = cipher.doFinal(encryptedBytes);
                     String result = new String(decrypted);
-                    if (isPlausiblePassword(result)) {
-                        return result;
-                    }
-                }
-            } catch (Exception e) {
-                log.debug("AES method 1 failed: {}", e.getMessage());
-            }
-
-            // Method 2: Use SHA-256 hashed key and MD5 hashed IV (like Python sample)
-            try {
-                byte[] keyData = Base64.getDecoder().decode(secretKey);
-                byte[] ivData = Base64.getDecoder().decode(secretVector);
-
-                // Hash the key with SHA-256
-                MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-                byte[] aesKey = sha256.digest(keyData);
-
-                // Hash the IV with MD5
-                MessageDigest md5 = MessageDigest.getInstance("MD5");
-                byte[] aesIv = md5.digest(ivData);
-
-                SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
-                IvParameterSpec ivSpec = new IvParameterSpec(aesIv);
-
-                Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-                cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
-
-                byte[] encrypted = hexStringToByteArray(encryptedPassword);
-                byte[] decrypted = cipher.doFinal(encrypted);
-                String result = new String(decrypted);
-                if (isPlausiblePassword(result)) {
+                    log.info("✅ AES method 2 successful");
                     return result;
                 }
             } catch (Exception e) {
                 log.debug("AES method 2 failed: {}", e.getMessage());
             }
 
-            // Method 3: Try with base64 decode of password (another approach in Python sample)
+            // Method 3: Simple AES approach using first 32 bytes as key, next 16 as IV
             try {
-                byte[] keyData = Base64.getDecoder().decode(secretKey);
-                byte[] ivData = Base64.getDecoder().decode(secretVector);
+                String combined = secretKey + secretVector;
+                byte[] allBytes = Base64.getDecoder().decode(combined);
 
-                SecretKeySpec keySpec = new SecretKeySpec(keyData, "AES");
-                IvParameterSpec ivSpec = new IvParameterSpec(ivData);
+                if (allBytes.length >= 48) { // 32 + 16
+                    byte[] keyBytes = new byte[32];
+                    byte[] ivBytes = new byte[16];
+                    System.arraycopy(allBytes, 0, keyBytes, 0, 32);
+                    System.arraycopy(allBytes, 32, ivBytes, 0, 16);
 
-                Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-                cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+                    SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+                    IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
 
-                // Try base64 decoding the encrypted password
-                byte[] encrypted;
-                try {
-                    encrypted = Base64.getDecoder().decode(encryptedPassword);
-                } catch (IllegalArgumentException e) {
-                    log.debug("Password not base64 encoded, skipping method 3");
-                    return null;
-                }
-
-                byte[] decrypted = cipher.doFinal(encrypted);
-                String result = new String(decrypted);
-                if (isPlausiblePassword(result)) {
+                    Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+                    cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+                    byte[] decrypted = cipher.doFinal(encryptedBytes);
+                    String result = new String(decrypted);
+                    log.info("✅ AES method 3 successful");
                     return result;
                 }
             } catch (Exception e) {

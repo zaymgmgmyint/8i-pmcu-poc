@@ -8,7 +8,6 @@ import com.eighti.pmcu.poc.response.FirstLoginResponse;
 import com.eighti.pmcu.poc.response.GetMqConfigResponse;
 import com.eighti.pmcu.poc.response.SecondLoginResponse;
 import com.eighti.pmcu.poc.util.MqPasswordDecrypter;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,15 +16,24 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
+
+import javax.crypto.Cipher;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
 import java.security.MessageDigest;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * AGENT: See: docs/dss-api-spec.md
+ * AGENT: For DSS API integration
+ * See: docs/dss-api-spec.md, dss_api_sample.py, dss_mq_sample.py
+ * See java implementation in docs/encryption_decryption.md
  */
 @Slf4j
 @Service
@@ -64,6 +72,7 @@ public class DssService {
 
         // Create headers - NO BASIC AUTH NEEDED
         HttpHeaders headers = new HttpHeaders();
+        headers.set("Accept-Language", "en");
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("User-Agent", "Spring Boot Application/1.0");
         headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
@@ -153,53 +162,29 @@ public class DssService {
             String temp4 = md5(userName + ":" + realm + ":" + temp3);
             String signature = md5(temp4 + ":" + randomKey);
 
-            // Step 2.1: Generate random secretKey (32 chars) and secretVector (16 chars)
-            String plainSecretKey = generateRandomAlphaNum(32);
-            String plainSecretVector = generateRandomAlphaNum(16);
-
-            // FIXED: Store plaintext keys for later decryption
-            this.lastPlainSecretKey = plainSecretKey;
-            this.lastPlainSecretVector = plainSecretVector;
-
-            log.info("Generated plain secretKey: {}", plainSecretKey);
-            log.info("Generated plain secretVector: {}", plainSecretVector);
-
-            // Step 2.2: RSA encrypt the plaintext secretKey and secretVector with DSS publicKey
-            // This matches what the Python sample does
-            String encryptedSecretKey = rsaEncryptWithDssPublicKey(plainSecretKey, publicKey);
-            String encryptedSecretVector = rsaEncryptWithDssPublicKey(plainSecretVector, publicKey);
-
-            log.info("RSA-encrypted secretKey: {}", encryptedSecretKey);
-            log.info("RSA-encrypted secretVector: {}", encryptedSecretVector);
-
-            // Step 3: Create the second login request (to /accounts/authorize)
+            // Step 3: Create the second login request - MATCH Python implementation exactly
             String url = baseUrl + "/brms/api/v1.0/accounts/authorize";
             HttpHeaders headers = new HttpHeaders();
+            headers.set("Accept-Language", "en");
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set("User-Agent", "Spring Boot Application/1.0");
             headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
 
             SecondLoginRequest secondLoginRequest = new SecondLoginRequest();
-            secondLoginRequest.setMac(""); // Set MAC if available, else empty
             secondLoginRequest.setSignature(signature);
             secondLoginRequest.setUserName(userName);
             secondLoginRequest.setRandomKey(randomKey);
-            secondLoginRequest.setPublicKey(publicKey); // Per docs, can be empty
             secondLoginRequest.setEncryptType("MD5");
             secondLoginRequest.setIpAddress(clientIp);
             secondLoginRequest.setClientType(clientType);
-            secondLoginRequest.setUserType("0"); // 0: System user
-            // Send the RSA-encrypted values, not base64-encoded plaintext
-            secondLoginRequest.setSecretKey(encryptedSecretKey);
-            secondLoginRequest.setSecretVector(encryptedSecretVector);
-            secondLoginRequest.setAuthorityType("0"); // Default authority type
+            secondLoginRequest.setPublicKey(publicKey);
+            secondLoginRequest.setUserType("0");
 
-            log.info("Second login request: {}", secondLoginRequest.toString());
+            log.info("Second login request: {}", secondLoginRequest);
 
             HttpEntity<SecondLoginRequest> requestEntity = new HttpEntity<>(secondLoginRequest, headers);
 
             log.info("Initiating second login request to DSS at {} for user: {}", url, userName);
-            log.info("Request body: {}", secondLoginRequest);
 
             ResponseEntity<SecondLoginResponse> responseEntity = restTemplate.exchange(
                     url,
@@ -210,10 +195,117 @@ public class DssService {
 
             SecondLoginResponse response = responseEntity.getBody();
             log.info("✅ Second login response: {}", response);
+
             if (response != null && response.getToken() != null) {
                 // Store token for keep-alive and other authenticated requests
                 currentToken.set(response.getToken());
-                log.info("✅ Second login successful for user: {}. Status: {}. Token stored.", userName, responseEntity.getStatusCode());
+
+                // CRITICAL FIX: Store secretKey/secretVector returned by DSS for MQ decryption
+                this.lastPlainSecretKey = response.getSecretKey();
+                this.lastPlainSecretVector = response.getSecretVector();
+
+                log.info("✅ Second login successful. Token stored.");
+                log.info("SecretKey from DSS: {}", this.lastPlainSecretKey != null ? "Present" : "NULL");
+                log.info("SecretVector from DSS: {}", this.lastPlainSecretVector != null ? "Present" : "NULL");
+            } else {
+                log.warn("⚠️ Second login successful but no token received");
+            }
+            return response;
+
+        } catch (org.springframework.web.client.HttpClientErrorException e) {
+            log.error("❌ HTTP error during second login request to DSS for user: {}. Status: {}, Response: {}", userName, e.getStatusCode(), e.getResponseBodyAsString(), e);
+            throw new DssServiceException("HTTP error during second login request to DSS: " + e.getStatusCode(), e);
+        } catch (RestClientException ex) {
+            log.error("❌ Error during second login request to DSS for user: {}. Exception: {}", userName, ex.getMessage(), ex);
+            throw new DssServiceException("Error during second login request to DSS", ex);
+        }
+    }
+
+    public SecondLoginResponse secondLogin1() {
+        try {
+            // Step 1: Perform first login to get realm, randomKey, and publicKey
+            FirstLoginResponse firstLoginResponse = firstLogin();
+            String realm = firstLoginResponse.getRealm();
+            String randomKey = firstLoginResponse.getRandomKey();
+            String publicKey = firstLoginResponse.getPublicKey();
+
+            // Step 2: Calculate signature as per Dahua API
+            String temp1 = md5(password);
+            String temp2 = md5(userName + temp1);
+            String temp3 = md5(temp2);
+            String temp4 = md5(userName + ":" + realm + ":" + temp3);
+            String signature = md5(temp4 + ":" + randomKey);
+
+            // Step 3: Create the second login request - MATCH Python implementation exactly
+            String url = baseUrl + "/brms/api/v1.0/accounts/authorize";
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("Accept-Language", "en");
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("User-Agent", "Spring Boot Application/1.0");
+            headers.set("Accept", MediaType.APPLICATION_JSON_VALUE);
+
+            // Generate your own AES key + IV for MQ password decryption later
+            byte[] aesKeyBytes    = new byte[32];  // 256-bit
+            byte[] aesIvBytes     = new byte[16];  // 128-bit
+            new SecureRandom().nextBytes(aesKeyBytes);
+            new SecureRandom().nextBytes(aesIvBytes);
+
+            // Base64-encode them and stash for your decryptor
+            String plainAesKey     = Base64.getEncoder().encodeToString(aesKeyBytes);
+            String plainAesVector  = Base64.getEncoder().encodeToString(aesIvBytes);
+
+            // keep them for your later MQ‐password decrypt
+            this.lastPlainSecretKey    = plainAesKey;    // stash for MQ decrypt
+            this.lastPlainSecretVector = plainAesVector; // stash for MQ decrypt
+
+            // RSA‐encrypt them with the DSS publicKey
+            String encryptedKey    = rsaEncryptWithDssPublicKey1(plainAesKey, publicKey);
+            String encryptedVector = rsaEncryptWithDssPublicKey1(plainAesVector, publicKey);
+
+            // AGENT: Debug logging for encrypted keys
+            log.info("🔐 Generated AES credentials:");
+            log.info("Plain AES Key length: {} bytes", aesKeyBytes.length);
+            log.info("Plain AES IV length: {} bytes", aesIvBytes.length);
+            log.info("Base64 AES Key length: {} chars", plainAesKey.length());
+            log.info("Base64 AES IV length: {} chars", plainAesVector.length());
+            log.info("RSA Encrypted Key length: {} chars", encryptedKey.length());
+            log.info("RSA Encrypted Vector length: {} chars", encryptedVector.length());
+
+            SecondLoginRequest secondLoginRequest = new SecondLoginRequest();
+            secondLoginRequest.setSignature(signature);
+            secondLoginRequest.setUserName(userName);
+            secondLoginRequest.setRandomKey(randomKey);
+            secondLoginRequest.setEncryptType("MD5");
+            secondLoginRequest.setIpAddress(clientIp);
+            secondLoginRequest.setClientType(clientType);
+            secondLoginRequest.setPublicKey(publicKey);
+            secondLoginRequest.setUserType("0");
+            // RSA-encrypted AES credentials
+            secondLoginRequest.setSecretKey(encryptedKey);
+            secondLoginRequest.setSecretVector(encryptedVector);
+
+            log.info("Second login request: {}", secondLoginRequest);
+
+            HttpEntity<SecondLoginRequest> requestEntity = new HttpEntity<>(secondLoginRequest, headers);
+
+            log.info("Initiating second login request to DSS at {} for user: {}", url, userName);
+
+            ResponseEntity<SecondLoginResponse> responseEntity = restTemplate.exchange(
+                    url,
+                    HttpMethod.POST,
+                    requestEntity,
+                    SecondLoginResponse.class
+            );
+
+            SecondLoginResponse response = responseEntity.getBody();
+            log.info("✅ Second login response: {}", response);
+
+            if (response != null && response.getToken() != null) {
+                // Store token for keep-alive and other authenticated requests
+                currentToken.set(response.getToken());
+                log.info("✅ Second login successful. Token stored.");
+                log.info("SecretKey from DSS: {}", this.lastPlainSecretKey != null ? "Present" : "NULL");
+                log.info("SecretVector from DSS: {}", this.lastPlainSecretVector != null ? "Present" : "NULL");
             } else {
                 log.warn("⚠️ Second login successful but no token received");
             }
@@ -256,6 +348,32 @@ public class DssService {
             throw new RuntimeException("Failed to RSA encrypt with DSS public key", e);
         }
     }
+
+    /**
+     * RSA encrypt data with DSS platform public key (PKCS#1 v1.5 padding).
+     * Splits into 245-byte chunks for a 2048-bit key.
+     */
+    private String rsaEncryptWithDssPublicKey1(String plaintext, String base64PublicKey) {
+        try {
+            byte[] der = Base64.getDecoder().decode(base64PublicKey);
+            PublicKey pub = KeyFactory.getInstance("RSA")
+                    .generatePublic(new X509EncodedKeySpec(der));
+            Cipher c = Cipher.getInstance("RSA/ECB/PKCS1Padding");
+            c.init(Cipher.ENCRYPT_MODE, pub);
+
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] data = plaintext.getBytes(StandardCharsets.UTF_8);
+            int blockSize = 245; // for 2048-bit key
+            for (int off = 0; off < data.length; off += blockSize) {
+                int len = Math.min(blockSize, data.length - off);
+                out.write(c.doFinal(data, off, len));
+            }
+            return Base64.getEncoder().encodeToString(out.toByteArray());
+        } catch (Exception e) {
+            throw new RuntimeException("RSA encryption failed", e);
+        }
+    }
+
 
     // Send keep alive to DSS
     public void sendKeepAlive() {
@@ -311,7 +429,7 @@ public class DssService {
             // If no token exists, perform full login
             if (token == null) {
                 log.info("No existing token, performing full login sequence");
-                SecondLoginResponse secondLoginResponse = secondLogin();
+                SecondLoginResponse secondLoginResponse = secondLogin1(); // AGENT: Use the correct method
                 token = secondLoginResponse.getToken();
 
                 if (token == null) {
@@ -322,6 +440,7 @@ public class DssService {
 
             String url = baseUrl + "/brms/api/v1.0/BRM/Config/GetMqConfig";
             HttpHeaders headers = new HttpHeaders();
+            headers.set("Accept-Language", "en");
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set("X-Subject-Token", token);
 
@@ -432,11 +551,13 @@ public class DssService {
      * Generate a random alphanumeric string of given length
      */
     private String generateRandomAlphaNum(int length) {
-        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                + "abcdefghijklmnopqrstuvwxyz"
+                + "0123456789";
+        SecureRandom rnd = new SecureRandom();
         StringBuilder sb = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            int idx = (int) (Math.random() * chars.length());
-            sb.append(chars.charAt(idx));
+            sb.append(chars.charAt(rnd.nextInt(chars.length())));
         }
         return sb.toString();
     }

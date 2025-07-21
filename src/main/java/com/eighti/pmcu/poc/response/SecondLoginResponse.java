@@ -50,37 +50,10 @@ public class SecondLoginResponse {
     @Schema(description = "Reused or not: 0=No, 1=Yes.", example = "1")
     private String reused;
 
-    @Schema(description = "User level: 1=Super administrator; 2=Administrator; 3=Custom role.", example = "1")
-    private String userLevel;
-
-    @Schema(description = "ID of the person bound to the app.", example = "1000001")
-    private String personId;
-
-    @Schema(description = "Whether the personnel is the owner, APP judges whether the personnel management is displayed.", example = "1")
-    private Integer houseHolder;
-
-    @Schema(description = "Forcibly modify password.", example = "0")
-    private Integer forceResetPassword;
-
-    @Schema(description = "Login UTC time.", example = "1726127578")
-    private Long loginDateUtc;
-
-    @Schema(description = "Enable password validity verification: 0=No, 1=Yes.", example = "1")
-    private String enablePasswordValidityPeriod;
-
-    @Schema(description = "The remaining validity period of the user's current password, in days.", example = "90")
-    private String passwordRemainValidityPeriod;
-
-    @Schema(description = "Has the IP of the current login changed from the previous login: 0=No, 1=Yes.", example = "0")
-    private String loginIpChanged;
-
-    @Schema(description = "The IP address of the current user’s last login.", example = "192.168.1.100")
-    private String lastLoginIp;
-
-    @Schema(description = "Ciphertext of secret key = RSA encryption (secret key, public key of terminal). Compatible with previous versions, when the publicKey parameter is empty, this field also returns empty.", example = "iYBQqQBCoq...N84A==")
+    @Schema(description = "Secret key for MQ password decryption (base64 encoded)")
     private String secretKey;
 
-    @Schema(description = "Vector ciphertext = RSA encryption (vector, public key of terminal). Compatible with previous versions, when the publicKey parameter is empty, this field also returns empty.", example = "AblgO+BAVca3...eW3GFPg==")
+    @Schema(description = "Secret vector for MQ password decryption (base64 encoded)")
     private String secretVector;
 
     @Data

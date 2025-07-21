@@ -30,7 +30,7 @@ public class DssAuthController {
     @GetMapping("/second-login")
     public SecondLoginResponse getSecondLogin() {
         log.info("Received request for DSS second login");
-        return dssService.secondLogin();
+        return dssService.secondLogin1();
     }
 
     @GetMapping("/mq-config")
